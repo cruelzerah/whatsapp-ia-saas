@@ -1,6 +1,6 @@
 // pages/admin/chat-logs.js
 import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabaseClient";
+import { supabase } from "../../../lib/supabaseClient";
 
 const SAAS_TITLE = "InfinixAI – Histórico de Conversas (Admin)";
 const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL || "";
