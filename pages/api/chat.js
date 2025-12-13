@@ -10,45 +10,30 @@ function toText(value) {
   try {
     if (value === null || value === undefined) return "";
 
-    // Se já for string
-    if (typeof value === "string") return value.trim();
+    if (typeof value === "string") {
+      return value;
+    }
 
-    // Se for number/bool
     if (typeof value === "number" || typeof value === "boolean") {
-      return String(value).trim();
+      return String(value);
     }
 
-    // Se for array, concatena
-    if (Array.isArray(value)) {
-      return value.map((v) => toText(v)).join(" ").trim();
-    }
-
-    // Se for objeto, tenta campos comuns
+    // Z-API costuma mandar objetos
     if (typeof value === "object") {
-      const candidates = [
-        value.message,
-        value.text,
-        value.body,
-        value.content,
-        value.caption,
-      ];
+      if (typeof value.message === "string") return value.message;
+      if (typeof value.text === "string") return value.text;
+      if (typeof value.body === "string") return value.body;
 
-      for (const c of candidates) {
-        const t = toText(c);
-        if (t) return t;
-      }
-
-      // fallback: json
-      return JSON.stringify(value).trim();
+      // último fallback
+      return JSON.stringify(value);
     }
 
-    // fallback final
-    return String(value).trim();
+    return String(value);
   } catch {
-    // NUNCA quebra o webhook
     return "";
   }
 }
+
 
 /**
  * OpenAI pode retornar message.content como string OU array (content parts).
