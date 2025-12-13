@@ -1,4 +1,5 @@
-// pages/produtos.js
+import { safeTrim } from '../lib/utils'; // ajusta o caminho se for pages/api/products.js: '../../lib/utils'
+// // pages/produtos.js
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
