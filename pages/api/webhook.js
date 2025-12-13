@@ -1,9 +1,11 @@
 // pages/api/webhook.js
+import applyTrimPatch from "../../lib/trimPatch";
+applyTrimPatch(); // aplica o patch assim que o módulo carrega
+
 import { sendWhatsAppText } from "../../lib/whatsapp";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
-import { buildIaPrompt } from "../../lib/promptBuilder";
-import { getOpenAIClient } from "../../lib/openaiClient";
-import { safeTrim } from "../../lib/utils";
+// ... resto dos imports
+
 
 export default async function handler(req, res) {
   // Health check

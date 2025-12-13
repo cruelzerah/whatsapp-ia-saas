@@ -1,7 +1,10 @@
 // pages/api/chat.js
+import applyTrimPatch from "../../lib/trimPatch";
+applyTrimPatch();
+
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
-import { buildIaPrompt } from "../../lib/promptBuilder";
-import { getOpenAIClient } from "../../lib/openaiClient";
+// ... resto dos imports
+
 
 // converte qualquer coisa em string (SEM trim)
 function safeString(v) {
