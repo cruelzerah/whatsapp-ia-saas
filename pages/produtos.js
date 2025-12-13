@@ -1,7 +1,19 @@
-import { safeTrim } from '../lib/utils'; // ajusta o caminho se for pages/api/products.js: '../../lib/utils'
-// // pages/produtos.js
+// pages/produtos.js
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
+
+// 👇 FUNÇÃO AUXILIAR SEGURA PARA TRIM
+function safeTrim(value) {
+  try {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value).trim();
+    if (typeof value === "object") return JSON.stringify(value).trim();
+    return String(value).trim();
+  } catch {
+    return "";
+  }
+}
 
 export default function ProductsPage() {
   const [user, setUser] = useState(null);
@@ -95,7 +107,8 @@ export default function ProductsPage() {
     setSaving(true);
 
     try {
-      if (!name.trim()) {
+      // 👇 USANDO safeTrim() AQUI
+      if (!safeTrim(name)) {
         setError("Informe pelo menos o nome do produto/serviço.");
         setSaving(false);
         return;
@@ -134,14 +147,14 @@ export default function ProductsPage() {
       }
 
       if (editingId) {
-        // 👇 UPDATE
+        // 👇 UPDATE COM safeTrim()
         const { error } = await supabase
           .from("products")
           .update({
-            name: name.trim(),
-            description: description.trim() || null,
+            name: safeTrim(name),
+            description: safeTrim(description) || null,
             price: parsedPrice,
-            category: category.trim() || null,
+            category: safeTrim(category) || null,
             image_url: finalImageUrl,
           })
           .eq("id", editingId)
@@ -154,13 +167,13 @@ export default function ProductsPage() {
           return;
         }
       } else {
-        // 👇 INSERT
+        // 👇 INSERT COM safeTrim()
         const { error } = await supabase.from("products").insert({
           user_id: user.id,
-          name: name.trim(),
-          description: description.trim() || null,
+          name: safeTrim(name),
+          description: safeTrim(description) || null,
           price: parsedPrice,
-          category: category.trim() || null,
+          category: safeTrim(category) || null,
           is_active: true,
           image_url: finalImageUrl,
         });
