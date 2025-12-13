@@ -1,137 +1,80 @@
 // pages/api/chat.js
-
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 import { buildIaPrompt } from "../../lib/promptBuilder";
 import { getOpenAIClient } from "../../lib/openaiClient";
 
-// =======================
-// Custos OpenAI
-// =======================
-const PRICE_INPUT_4_1_MINI = 0.15 / 1_000_000;
-const PRICE_OUTPUT_4_1_MINI = 0.60 / 1_000_000;
-const USD_BRL_RATE = Number(process.env.USD_BRL_RATE || "5.5");
+/**
+ * Normaliza QUALQUER entrada para string segura
+ */
+function toText(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
 
-// =======================
-// Helpers Z-API
-// =======================
-function normalizePhoneBR(phone) {
-  if (!phone) return null;
-  return String(phone).replace(/\D/g, "") || null;
-}
+  if (value && typeof value === "object") {
+    if (typeof value.message === "string") return value.message.trim();
+    if (typeof value.text === "string") return value.text.trim();
+    if (typeof value.body === "string") return value.body.trim();
 
-async function zapiSendText({ phone, message }) {
-  const instanceId = process.env.ZAPI_INSTANCE_ID;
-  const token = process.env.ZAPI_TOKEN;
-  const clientToken = process.env.ZAPI_CLIENT_TOKEN;
-
-  if (!instanceId || !token) {
-    throw new Error("Z-API não configurada");
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
   }
 
-  const url = `https://api.z-api.io/instances/${instanceId}/token/${token}/send-text`;
-
-  const headers = { "Content-Type": "application/json" };
-  if (clientToken) headers["Client-Token"] = clientToken;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ phone, message }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(err);
-  }
+  return "";
 }
 
-// =======================
-// EXTRATOR CORRETO Z-API
-// =======================
-function extractFromZapiPayload(body) {
-  let phone = null;
-  let text = null;
-
-  // telefone
-  phone =
-    body?.phone ||
-    body?.from ||
-    body?.connectedPhone ||
-    body?.sender ||
-    body?.data?.phone ||
-    body?.message?.from;
-
-  // texto (Z-API manda como objeto)
-  if (typeof body?.text === "string") {
-    text = body.text;
-  } else if (typeof body?.text?.message === "string") {
-    text = body.text.message;
-  } else if (typeof body?.message?.text === "string") {
-    text = body.message.text;
-  } else if (typeof body?.message?.body === "string") {
-    text = body.message.body;
-  }
-
-  phone = normalizePhoneBR(phone);
-  text = typeof text === "string" ? text.trim() : null;
-
-  return { phone, text };
-}
-
-// =======================
-// HANDLER PRINCIPAL
-// =======================
 export default async function handler(req, res) {
   try {
-    // ===================
-    // GET = health check
-    // ===================
+    // =========================
+    // GET — healthcheck
+    // =========================
     if (req.method === "GET") {
       return res.status(200).json({
         ok: true,
         route: "/api/chat",
-        hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
-        hasSupabase: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
-        hasZapi: Boolean(process.env.ZAPI_INSTANCE_ID),
+        hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+        hasSupabase: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
       });
     }
 
     if (req.method !== "POST") {
-      return res.status(405).json({ error: "Método não permitido" });
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
     const body = req.body || {};
-    const isInternal = Boolean(body.userId);
 
-    // ===================
-    // WEBHOOK Z-API
-    // ===================
-    let message = body.message;
-    let userId = body.userId;
-    let conversationId = body.conversationId || null;
-    let fromPhone = null;
+    // =========================
+    // Detecta se é webhook Z-API
+    // =========================
+    const isWebhook = !body.userId;
 
-    if (!isInternal) {
-      console.log("Z-API WEBHOOK:", JSON.stringify(body, null, 2));
+    let userId = body.userId || process.env.DEFAULT_USER_ID;
+    let message = "";
 
-      const extracted = extractFromZapiPayload(body);
-      fromPhone = extracted.phone;
-      message = extracted.text;
+    if (isWebhook) {
+      console.log("📩 Z-API WEBHOOK:", JSON.stringify(body, null, 2));
 
-      userId = process.env.DEFAULT_USER_ID;
+      message =
+        toText(body?.text?.message) ||
+        toText(body?.message?.text) ||
+        toText(body?.message) ||
+        toText(body?.text);
 
-      if (!userId || !fromPhone || !message) {
+      if (!userId || !message) {
         return res.status(200).json({ ok: true, skipped: true });
+      }
+    } else {
+      message = toText(body.message);
+      if (!userId || !message) {
+        return res.status(400).json({ error: "Missing message or userId" });
       }
     }
 
-    if (!message || !userId) {
-      return res.status(400).json({ error: "message ou userId ausente" });
-    }
-
-    // ===================
-    // SETTINGS
-    // ===================
+    // =========================
+    // Busca configurações
+    // =========================
     const { data: settings } = await supabaseAdmin
       .from("company_settings")
       .select("*")
@@ -139,24 +82,22 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (!settings) {
-      return isInternal
-        ? res.status(404).json({ error: "Empresa sem configuração" })
-        : res.status(200).json({ ok: true });
+      return res.status(200).json({ ok: true, skipped: "no_settings" });
     }
 
-    // ===================
-    // PRODUTOS
-    // ===================
+    // =========================
+    // Produtos
+    // =========================
     const { data: products = [] } = await supabaseAdmin
       .from("products")
-      .select("id, name, description, price")
-      .eq("user_id", userId)
-      .limit(100);
+      .select("*")
+      .eq("user_id", userId);
 
-    // ===================
-    // OPENAI
-    // ===================
+    // =========================
+    // Prompt
+    // =========================
     const prompt = buildIaPrompt(settings, products, message);
+
     const openai = getOpenAIClient();
 
     const completion = await openai.chat.completions.create({
@@ -164,48 +105,13 @@ export default async function handler(req, res) {
       messages: [{ role: "user", content: prompt }],
     });
 
-    const aiText =
+    const reply =
       completion?.choices?.[0]?.message?.content ||
       "Não consegui responder agora.";
 
-    // ===================
-    // CONVERSA
-    // ===================
-    if (!conversationId) {
-      const { data: conv } = await supabaseAdmin
-        .from("conversations")
-        .insert({
-          user_id: userId,
-          title: message.slice(0, 100),
-          meta: fromPhone ? { fromPhone } : null,
-        })
-        .select("id")
-        .single();
-
-      conversationId = conv?.id;
-    }
-
-    if (conversationId) {
-      await supabaseAdmin.from("chat_logs").insert([
-        { user_id: userId, role: "user", message, conversation_id: conversationId },
-        { user_id: userId, role: "assistant", message: aiText, conversation_id: conversationId },
-      ]);
-    }
-
-    // ===================
-    // ENVIA RESPOSTA
-    // ===================
-    if (!isInternal && fromPhone) {
-      await zapiSendText({ phone: fromPhone, message: aiText });
-      return res.status(200).json({ ok: true });
-    }
-
-    return res.status(200).json({
-      reply: aiText,
-      conversationId,
-    });
+    return res.status(200).json({ reply });
   } catch (err) {
-    console.error("ERRO /api/chat:", err);
-    return res.status(200).json({ ok: true });
+    console.error("🔥 CHAT ERROR:", err);
+    return res.status(200).json({ ok: true, error: "internal_error" });
   }
 }
