@@ -1,34 +1,26 @@
-// pages/api/whatsapp/webhook.js
-
-const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+import { sendWhatsAppText } from "../../../lib/whatsapp";
 
 export default async function handler(req, res) {
-  // 1) Verificação do webhook (Meta chama via GET)
+  // Health check simples
   if (req.method === "GET") {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
-    }
-    return res.status(403).json({ error: "Forbidden" });
+    return res.status(200).json({ ok: true });
   }
 
-  // 2) Recebimento de mensagens/eventos (Meta chama via POST)
-  if (req.method === "POST") {
-    try {
-      const body = req.body;
-
-      // (Opcional) log pra debug
-      // console.log(JSON.stringify(body, null, 2));
-
-      // ✅ aqui depois a gente extrai msg e responde usando seu sendWhatsAppText()
-      return res.status(200).json({ ok: true });
-    } catch (e) {
-      return res.status(500).json({ error: e.message || "server_error" });
-    }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  return res.status(405).json({ error: "Method not allowed" });
+  try {
+    const payload = req.body;
+
+    console.log("Z-API WEBHOOK PAYLOAD:", JSON.stringify(payload, null, 2));
+
+    // ⚠️ Ainda NÃO vou tentar extrair phone/text sem ver o formato real do payload da sua conta
+    // Próximo passo: você me manda 1 payload do log e eu coloco a extração certinha + IA + resposta.
+
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message || "server_error" });
+  }
 }
