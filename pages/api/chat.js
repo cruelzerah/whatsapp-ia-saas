@@ -1,28 +1,12 @@
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
-import { buildIaPrompt } from "../../lib/promptBuilder";
-import { getOpenAIClient } from "../../lib/openaiClient";
+// pages/api/chat.js
 
-/**
- * Normaliza qualquer entrada para STRING SEGURA
- * (NUNCA quebra com objetos)
- */
-function toText(value) {
+function toText(v) {
   try {
-    if (value === null || value === undefined) return "";
-
-    if (typeof value === "string") return value;
-    if (typeof value === "number" || typeof value === "boolean")
-      return String(value);
-
-    if (typeof value === "object") {
-      if (typeof value.message === "string") return value.message;
-      if (typeof value.text === "string") return value.text;
-      if (typeof value.body === "string") return value.body;
-
-      return JSON.stringify(value);
-    }
-
-    return String(value);
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v; // SEM trim!
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
   } catch {
     return "";
   }
@@ -30,16 +14,8 @@ function toText(value) {
 
 export default async function handler(req, res) {
   try {
-    // =========================
-    // GET — healthcheck
-    // =========================
     if (req.method === "GET") {
-      return res.status(200).json({
-        ok: true,
-        route: "/api/chat",
-        hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-        hasSupabase: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-      });
+      return res.status(200).json({ ok: true, route: "/api/chat" });
     }
 
     if (req.method !== "POST") {
@@ -48,9 +24,24 @@ export default async function handler(req, res) {
 
     const body = req.body || {};
 
-    // =========================
-    // Detecta webhook Z-API
-    // =========================
-    const isWebhook = !body.userId;
+    // tenta pegar mensagem de tudo que é jeito, SEM trim
+    const message =
+      toText(body?.text?.message) ||
+      toText(body?.message?.text) ||
+      toText(body?.message) ||
+      toText(body?.text) ||
+      toText(body?.messageText) ||
+      toText(body?.body) ||
+      toText(body);
 
-    let userId = body.userId ||
+    // Só devolve o que chegou
+    return res.status(200).json({
+      ok: true,
+      gotType: typeof message,
+      messagePreview: message.slice(0, 200),
+    });
+  } catch (err) {
+    console.error("API CHAT ERROR:", err);
+    return res.status(200).json({ ok: false, error: "internal_error" });
+  }
+}
