@@ -138,14 +138,14 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Método não permitido" });
-  }
+    const body = req.body || {};
+const isInternalRequest = Boolean(body.userId);
 
-  // ⚠️ NUNCA devolva 400 pra webhook em produção (evita re-tentativas infinitas)
-  // Para chamadas internas (seu painel), podemos devolver 400.
-  // Vamos detectar origem: se tiver `userId` no body, é interno. Caso contrário, é webhook.
-  const body = req.body || {};
-  const isInternalRequest = Boolean(body.userId);
+// ✅ Se for webhook (Z-API), NUNCA devolva 400: devolve 200 e loga.
+if (!isInternalRequest) {
+  console.log("ZAPI WEBHOOK BODY:", JSON.stringify(body, null, 2));
+  return res.status(200).json({ ok: true, received: true });
+}
 
   try {
     // ✅ trava clara se não tiver key na Vercel
