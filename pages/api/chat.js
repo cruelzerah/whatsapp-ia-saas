@@ -1,135 +1,217 @@
-// lib/promptBuilder.js
+// pages/api/chat.js
+import { supabaseAdmin } from "../../lib/supabaseAdmin";
+import { buildIaPrompt } from "../../lib/promptBuilder";
+import { getOpenAIClient } from "../../lib/openaiClient";
 
 /**
- * Gera o prompt que será enviado para a IA
- *
- * @param {object} settings    - registro da tabela company_settings
- * @param {Array}  products    - lista de produtos/serviços
- * @param {string} userMessage - mensagem do cliente (JÁ NORMALIZADA)
+ * Converte qualquer valor em string "segura" (sem quebrar com trim)
  */
-export function buildIaPrompt(settings = {}, products = [], userMessage = "") {
-  const {
-    company_name,
-    business_description,
-    tone,
-    opening_hours,
+function toText(value) {
+  try {
+    if (value === null || value === undefined) return "";
 
-    // objeções
-    objection_price,
-    objection_warranty,
-    objection_delivery,
-    objection_trust,
-    objection_alternative,
-  } = settings;
+    // Se já for string
+    if (typeof value === "string") return value.trim();
 
-  // =========================
-  // Produtos (proteção total)
-  // =========================
-  const safeProducts = Array.isArray(products) ? products : [];
+    // Se for number/bool
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value).trim();
+    }
 
-  const activeProducts = safeProducts.filter(
-    (p) => p?.is_active === true || p?.is_active === null || p?.is_active === undefined
-  );
+    // Se for array, concatena
+    if (Array.isArray(value)) {
+      return value.map((v) => toText(v)).join(" ").trim();
+    }
 
-  const inactiveProducts = safeProducts.filter((p) => p?.is_active === false);
+    // Se for objeto, tenta campos comuns
+    if (typeof value === "object") {
+      const candidates = [
+        value.message,
+        value.text,
+        value.body,
+        value.content,
+        value.caption,
+      ];
 
-  const renderProduct = (p) => {
-    const name = p?.name || "Produto";
-    const category = p?.category ? ` [${p.category}]` : "";
-    const price =
-      p?.price !== null && p?.price !== undefined
-        ? ` - R$ ${Number(p.price).toFixed(2)}`
-        : "";
-    const desc = p?.description ? ` – ${p.description}` : "";
-    const stock =
-      p?.is_active === false ? " (SEM ESTOQUE)" : " (DISPONÍVEL)";
+      for (const c of candidates) {
+        const t = toText(c);
+        if (t) return t;
+      }
 
-    return `• ${name}${category}${price}${desc}${stock}`;
-  };
+      // fallback: json
+      return JSON.stringify(value).trim();
+    }
 
-  let productsBlock = "";
-
-  if (safeProducts.length > 0) {
-    productsBlock = `
-CATÁLOGO DA EMPRESA:
-
-Produtos disponíveis para venda:
-${activeProducts.length > 0 ? activeProducts.map(renderProduct).join("\n") : "- Nenhum produto disponível no momento."}
-
-${
-  inactiveProducts.length > 0
-    ? `
-Produtos sem estoque (NÃO OFERECER, apenas informar se o cliente pedir):
-${inactiveProducts.map(renderProduct).join("\n")}
-`
-    : ""
+    // fallback final
+    return String(value).trim();
+  } catch {
+    // NUNCA quebra o webhook
+    return "";
+  }
 }
-`;
-  } else {
-    productsBlock = `
-Nenhum produto foi cadastrado ainda.
-- Não invente preços ou detalhes.
-- Oriente o cliente a falar com a loja.
-`;
+
+/**
+ * OpenAI pode retornar message.content como string OU array (content parts).
+ * Isso evita o erro "?.trim is not a function".
+ */
+function extractOpenAIText(completion) {
+  const content = completion?.choices?.[0]?.message?.content;
+
+  // string normal
+  if (typeof content === "string") return content.trim();
+
+  // array de parts (ex: [{type:"text", text:"..."}])
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((part) => {
+        // formatos mais comuns
+        if (typeof part === "string") return part;
+        if (part?.text) return toText(part.text);
+        if (part?.content) return toText(part.content);
+        if (part?.message) return toText(part.message);
+        return toText(part);
+      })
+      .join(" ")
+      .trim();
+
+    return joined || "";
   }
 
-  // =========================
-  // Objeções
-  // =========================
-  let objectionsBlock = "";
+  // objeto/qualquer outra coisa
+  return toText(content);
+}
 
-  if (
-    objection_price ||
-    objection_warranty ||
-    objection_delivery ||
-    objection_trust ||
-    objection_alternative
-  ) {
-    objectionsBlock = `
-COMO QUEBRAR OBJEÇÕES DO CLIENTE:
+export default async function handler(req, res) {
+  try {
+    // =========================
+    // GET — healthcheck
+    // =========================
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true,
+        route: "/api/chat",
+        method: "GET",
+        hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
+        hasSupabaseUrl: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
+        hasServiceRole: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+        hasZapiInstance: Boolean(process.env.ZAPI_INSTANCE_ID),
+        hasZapiToken: Boolean(process.env.ZAPI_TOKEN),
+        hasDefaultUserId: Boolean(process.env.DEFAULT_USER_ID),
+      });
+    }
 
-${objection_price ? `• Preço: ${objection_price}` : ""}
-${objection_warranty ? `• Garantia/Segurança: ${objection_warranty}` : ""}
-${objection_delivery ? `• Prazo/Entrega: ${objection_delivery}` : ""}
-${objection_trust ? `• Confiança na loja: ${objection_trust}` : ""}
-${objection_alternative ? `• Alternativas mais baratas: ${objection_alternative}` : ""}
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-Adapte o texto para soar natural, sem parecer robótico.
-`;
+    // =========================
+    // Body pode vir como string em alguns cenários
+    // =========================
+    let body = req.body || {};
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
+
+    // =========================
+    // Detecta se é webhook Z-API
+    // =========================
+    const isWebhook = !body.userId;
+
+    let userId = body.userId || process.env.DEFAULT_USER_ID;
+
+    // pegando msg do webhook (Z-API costuma mandar text.message)
+    let message = "";
+
+    if (isWebhook) {
+      console.log("📩 Z-API WEBHOOK BODY:", JSON.stringify(body, null, 2));
+
+      message =
+        toText(body?.text?.message) ||
+        toText(body?.message?.text) ||
+        toText(body?.message) ||
+        toText(body?.text);
+
+      // se não tiver userId ou mensagem, responde 200 (não fica em retry)
+      if (!userId || !message) {
+        return res.status(200).json({ ok: true, skipped: true });
+      }
+    } else {
+      message = toText(body.message);
+      if (!userId || !message) {
+        return res.status(400).json({ error: "Missing message or userId" });
+      }
+    }
+
+    // =========================
+    // Trava clara se não tiver key
+    // =========================
+    if (!process.env.OPENAI_API_KEY) {
+      console.error("OPENAI_API_KEY não configurada");
+      return isWebhook
+        ? res.status(200).json({ ok: true, skipped: "missing_openai_key" })
+        : res.status(500).json({ error: "OPENAI_API_KEY não configurada" });
+    }
+
+    // =========================
+    // Busca configurações
+    // =========================
+    const { data: settings, error: settingsError } = await supabaseAdmin
+      .from("company_settings")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (settingsError) {
+      console.error("Erro company_settings:", settingsError);
+      return isWebhook
+        ? res.status(200).json({ ok: true, skipped: "settings_error" })
+        : res.status(500).json({ error: "Erro ao buscar settings" });
+    }
+
+    if (!settings) {
+      return isWebhook
+        ? res.status(200).json({ ok: true, skipped: "no_settings" })
+        : res.status(404).json({ error: "no_settings" });
+    }
+
+    // =========================
+    // Produtos
+    // =========================
+    const { data: products = [], error: prodErr } = await supabaseAdmin
+      .from("products")
+      .select("*")
+      .eq("user_id", userId);
+
+    if (prodErr) console.error("Erro products:", prodErr);
+
+    // =========================
+    // Prompt
+    // =========================
+    const prompt = buildIaPrompt(settings, products, message);
+
+    // =========================
+    // OpenAI
+    // =========================
+    const openai = getOpenAIClient();
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const reply = extractOpenAIText(completion) || "Não consegui responder agora.";
+
+    // =========================
+    // Retorno
+    // =========================
+    return res.status(200).json({ reply });
+  } catch (err) {
+    console.error("🔥 /api/chat ERROR:", err);
+    // webhook SEMPRE 200
+    return res.status(200).json({ ok: true, error: "internal_error" });
   }
-
-  // =========================
-  // PROMPT FINAL
-  // =========================
-  return `
-Você é a **InfinixAI**, atendente virtual da empresa "${company_name || "Empresa"}".
-
-SOBRE A EMPRESA:
-${business_description || "Descrição não informada."}
-
-HORÁRIO DE ATENDIMENTO:
-${opening_hours || "Horário não informado. Responda de forma educada."}
-
-ESTILO DE ATENDIMENTO:
-${tone || "Atendimento humano, simpático, profissional e objetivo."}
-
-${productsBlock}
-
-${objectionsBlock}
-
-REGRAS IMPORTANTES:
-- Responda SEMPRE em português do Brasil.
-- Fale como um vendedor humano da empresa.
-- Nunca diga que é uma IA ou robô.
-- Use emojis com moderação 🙂
-- NÃO invente preços, prazos ou garantias.
-- Se não souber algo, seja honesto.
-- Produtos SEM ESTOQUE não devem ser vendidos.
-- Se o cliente perguntar algo fora do catálogo, ofereça ajuda ou alternativa.
-
-MENSAGEM DO CLIENTE:
-"${userMessage}"
-
-Responda de forma clara, direta e amigável.
-`.trim();
 }
