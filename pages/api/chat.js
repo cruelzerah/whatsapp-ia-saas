@@ -1,111 +1,43 @@
 // pages/api/chat.js
-import applyTrimPatch from "../../lib/trimPatch";
-applyTrimPatch();
-
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
-// ... resto dos imports
-
-
-// converte qualquer coisa em string (SEM trim)
-function safeString(v) {
-  try {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string") return v;
-    if (typeof v === "number" || typeof v === "boolean") return String(v);
-    if (typeof v === "object") return JSON.stringify(v);
-    return String(v);
-  } catch {
-    return "";
-  }
-}
 
 export default async function handler(req, res) {
   try {
-    // Healthcheck
+    // Healthcheck (GET)
     if (req.method === "GET") {
       return res.status(200).json({
         ok: true,
         route: "/api/chat",
-        hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-        hasSupabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+        mode: "minimal-test",
+        timestamp: new Date().toISOString(),
       });
     }
 
+    // Só aceita POST
     if (req.method !== "POST") {
       return res.status(405).json({ ok: false, error: "Method not allowed" });
     }
 
-    const body = req.body || {};
+    // Loga exatamente o que está chegando
+    console.log("=== /api/chat MINIMAL TEST ===");
+    console.log("timestamp:", new Date().toISOString());
+    console.log("body type:", typeof req.body);
+    console.log("body content:", JSON.stringify(req.body, null, 2));
 
-    // Detecta webhook Z-API (normalmente não vem userId)
-    const isWebhook = !body.userId;
-
-    const userId = safeString(body.userId || process.env.DEFAULT_USER_ID);
-
-    // Extrai a mensagem do jeito mais tolerante possível
-    const message =
-      safeString(body?.text?.message) ||
-      safeString(body?.message?.text) ||
-      safeString(body?.message) ||
-      safeString(body?.text) ||
-      safeString(body?.messageText) ||
-      safeString(body?.body);
-
-    // LOGS para descobrir exatamente o que está chegando
-    console.log("=== /api/chat IN ===");
-    console.log("isWebhook:", isWebhook);
-    console.log("userId:", userId);
-    console.log("message type:", typeof message);
-    console.log("message preview:", message.slice(0, 200));
-    console.log("raw body keys:", Object.keys(body || {}));
-
-    if (!userId || !message) {
-      return res.status(200).json({ ok: true, skipped: true, reason: "missing_user_or_message" });
-    }
-
-    // Busca configurações
-    const { data: settings, error: settingsErr } = await supabaseAdmin
-      .from("company_settings")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (settingsErr) {
-      console.error("SUPABASE settings error:", settingsErr);
-      return res.status(200).json({ ok: true, skipped: true, reason: "settings_error" });
-    }
-
-    if (!settings) {
-      return res.status(200).json({ ok: true, skipped: true, reason: "no_settings" });
-    }
-
-    // Produtos
-    const { data: products, error: prodErr } = await supabaseAdmin
-      .from("products")
-      .select("*")
-      .eq("user_id", userId);
-
-    if (prodErr) {
-      console.error("SUPABASE products error:", prodErr);
-    }
-
-    const prompt = buildIaPrompt(settings, products || [], message);
-
-    const openai = getOpenAIClient();
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
+    // Resposta fixa (SEM chamar Supabase, OpenAI ou qualquer outra coisa)
+    return res.status(200).json({
+      ok: true,
+      reply: "Teste minimal - /api/chat está funcionando sem erros de .trim()",
+      receivedBody: req.body,
     });
 
-    const reply =
-      completion?.choices?.[0]?.message?.content ||
-      "Não consegui responder agora. Pode repetir sua pergunta, por favor?";
-
-    return res.status(200).json({ ok: true, reply });
   } catch (err) {
-    console.error("🔥 /api/chat ERROR:", err);
-    // IMPORTANTE: nunca retornar 500 pro webhook (pra não ficar tentando e lotar)
-    return res.status(200).json({ ok: false, error: "internal_error" });
+    console.error("🔥 /api/chat MINIMAL ERROR:", err);
+    console.error("Stack:", err.stack);
+    
+    return res.status(200).json({ 
+      ok: false, 
+      error: "minimal_error",
+      message: err.message,
+    });
   }
 }
