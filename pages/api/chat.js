@@ -1,4 +1,30 @@
 // pages/api/chat.js
+
+// ====== PATCH GLOBAL PARA .trim() ======
+// ISSO PRECISA ESTAR NO TOPO, ANTES DE QUALQUER IMPORT
+if (typeof String.prototype.trim === "function") {
+  const originalTrim = String.prototype.trim;
+  
+  String.prototype.trim = function() {
+    // Se this for null/undefined, retorna string vazia
+    if (this == null) return "";
+    
+    // Se já for string, usa trim original
+    if (typeof this === "string") {
+      return originalTrim.call(this);
+    }
+    
+    // Caso contrário, converte para string primeiro
+    try {
+      return String(this).trim();
+    } catch (e) {
+      console.warn("⚠️ trim() chamado em valor não-string:", typeof this, this);
+      return "";
+    }
+  };
+}
+// ====== FIM DO PATCH ======
+
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 import { buildIaPrompt } from "../../lib/promptBuilder";
 import { getOpenAIClient } from "../../lib/openaiClient";
@@ -6,6 +32,8 @@ import { safeString } from "../../lib/utils";
 
 export default async function handler(req, res) {
   try {
+    console.log("🟢 /api/chat START - timestamp:", new Date().toISOString());
+
     // Healthcheck
     if (req.method === "GET") {
       return res.status(200).json({
@@ -13,6 +41,7 @@ export default async function handler(req, res) {
         route: "/api/chat",
         hasOpenAIKey: !!process.env.OPENAI_API_KEY,
         hasSupabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+        trimPatchActive: true,
       });
     }
 
@@ -22,12 +51,12 @@ export default async function handler(req, res) {
 
     const body = req.body || {};
 
-    // Detecta webhook Z-API (normalmente não vem userId)
+    // Detecta webhook Z-API
     const isWebhook = !body.userId;
 
     const userId = safeString(body.userId || process.env.DEFAULT_USER_ID);
 
-    // Extrai a mensagem do jeito mais tolerante possível
+    // Extrai mensagem de TODAS as formas possíveis
     const message =
       safeString(body?.text?.message) ||
       safeString(body?.message?.text) ||
@@ -36,17 +65,24 @@ export default async function handler(req, res) {
       safeString(body?.messageText) ||
       safeString(body?.body);
 
-    // LOGS para descobrir exatamente o que está chegando
-    console.log("=== /api/chat IN ===");
-    console.log("isWebhook:", isWebhook);
-    console.log("userId:", userId);
-    console.log("message type:", typeof message);
-    console.log("message preview:", String(message || "").slice(0, 200));
-    console.log("raw body keys:", Object.keys(body || {}));
+    console.log("📩 /api/chat RECEIVED:", {
+      isWebhook,
+      userId,
+      messageLength: message.length,
+      bodyKeys: Object.keys(body),
+    });
 
     if (!userId || !message) {
-      return res.status(200).json({ ok: true, skipped: true, reason: "missing_user_or_message" });
+      console.log("⚠️ Missing userId or message, skipping");
+      return res.status(200).json({ 
+        ok: true, 
+        skipped: true, 
+        reason: "missing_user_or_message",
+        received: { userId, message: message.slice(0, 50) }
+      });
     }
+
+    console.log("🔍 Fetching settings for userId:", userId);
 
     // Busca configurações
     const { data: settings, error: settingsErr } = await supabaseAdmin
@@ -56,26 +92,35 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (settingsErr) {
-      console.error("SUPABASE settings error:", settingsErr);
-      return res.status(200).json({ ok: true, skipped: true, reason: "settings_error" });
+      console.error("❌ SUPABASE settings error:", settingsErr);
+      return res.status(200).json({ ok: true, skipped: true, reason: "settings_error", error: settingsErr.message });
     }
 
     if (!settings) {
+      console.log("⚠️ No settings found for userId:", userId);
       return res.status(200).json({ ok: true, skipped: true, reason: "no_settings" });
     }
 
+    console.log("✅ Settings found:", settings.company_name);
+
     // Produtos
+    console.log("🔍 Fetching products for userId:", userId);
+    
     const { data: products, error: prodErr } = await supabaseAdmin
       .from("products")
       .select("*")
       .eq("user_id", userId);
 
     if (prodErr) {
-      console.error("SUPABASE products error:", prodErr);
+      console.error("❌ SUPABASE products error:", prodErr);
+    } else {
+      console.log("✅ Products found:", products?.length || 0);
     }
 
+    console.log("🤖 Building prompt...");
     const prompt = buildIaPrompt(settings, products || [], message);
 
+    console.log("🤖 Calling OpenAI...");
     const openai = getOpenAIClient();
 
     const completion = await openai.chat.completions.create({
@@ -87,10 +132,20 @@ export default async function handler(req, res) {
       completion?.choices?.[0]?.message?.content ||
       "Não consegui responder agora. Pode repetir sua pergunta, por favor?";
 
+    console.log("✅ OpenAI reply:", reply.slice(0, 100));
+
     return res.status(200).json({ ok: true, reply });
+    
   } catch (err) {
-    console.error("🔥 /api/chat ERROR:", err);
-    console.error("Stack:", err.stack);
-    return res.status(200).json({ ok: false, error: "internal_error", message: err.message });
+    console.error("🔥 /api/chat ERROR:", err.message);
+    console.error("🔥 Stack:", err.stack);
+    console.error("🔥 Type:", err.constructor.name);
+    
+    return res.status(200).json({ 
+      ok: false, 
+      error: "internal_error", 
+      message: err.message,
+      type: err.constructor.name,
+    });
   }
 }
