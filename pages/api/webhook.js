@@ -34,7 +34,6 @@ function safePhone(v) {
   return s.replace(/\D/g, "");
 }
 
-// Função para enviar mensagem via Z-API
 async function sendWhatsAppText(phone, text) {
   try {
     const cleanPhone = safePhone(phone);
@@ -80,6 +79,8 @@ async function sendWhatsAppText(phone, text) {
 }
 
 export default async function handler(req, res) {
+  console.log("🔵 /api/webhook called - method:", req.method);
+
   // Health check
   if (req.method === "GET") {
     return res.status(200).json({ 
@@ -90,6 +91,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
+    console.log("❌ Method not POST, returning 405");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
@@ -120,10 +122,17 @@ export default async function handler(req, res) {
 
     console.log("✅ Mensagem válida:", phone, "→", message.slice(0, 50));
 
-    // Chama o /api/chat com userId fixo (use o DEFAULT_USER_ID ou seu userId real)
+    // Chama o /api/chat com userId fixo
     const userId = process.env.DEFAULT_USER_ID || "seu-user-id-aqui";
 
-    const chatResponse = await fetch(`${req.headers.host?.includes('localhost') ? 'http' : 'https'}://${req.headers.host}/api/chat`, {
+    console.log("🔄 Calling /api/chat with userId:", userId);
+
+    const protocol = req.headers.host?.includes('localhost') ? 'http' : 'https';
+    const chatUrl = `${protocol}://${req.headers.host}/api/chat`;
+
+    console.log("🔄 Chat URL:", chatUrl);
+
+    const chatResponse = await fetch(chatUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
