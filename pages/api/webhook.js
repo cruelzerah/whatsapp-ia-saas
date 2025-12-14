@@ -1,11 +1,50 @@
 // pages/api/webhook.js
-import applyTrimPatch from "../../lib/trimPatch";
-applyTrimPatch(); // aplica o patch assim que o módulo carrega
+import { safeTrim, safePhone } from "../../lib/utils";
 
-import { sendWhatsAppText } from "../../lib/whatsapp";
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
-// ... resto dos imports
+// Função temporária inline (depois vamos criar lib/whatsapp.js)
+async function sendWhatsAppText(phone, text) {
+  try {
+    const cleanPhone = safePhone(phone);
+    const cleanText = safeTrim(text);
 
+    if (!cleanPhone || !cleanText) {
+      console.warn("⚠️ sendWhatsAppText: phone ou text vazio", { phone, text });
+      return { ok: false, reason: "phone_or_text_empty" };
+    }
+
+    const instanceId = process.env.ZAPI_INSTANCE_ID;
+    const token = process.env.ZAPI_TOKEN;
+
+    if (!instanceId || !token) {
+      console.error("❌ ZAPI_INSTANCE_ID ou ZAPI_TOKEN não configurados");
+      return { ok: false, reason: "missing_env" };
+    }
+
+    const url = `https://api.z-api.io/instances/${instanceId}/token/${token}/send-text`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: cleanPhone,
+        message: cleanText,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ Z-API erro:", data);
+      return { ok: false, reason: "zapi_error", data };
+    }
+
+    console.log("✅ Mensagem enviada via Z-API:", { phone: cleanPhone, text: cleanText.slice(0, 50) });
+    return { ok: true, data };
+  } catch (err) {
+    console.error("❌ sendWhatsAppText exception:", err);
+    return { ok: false, reason: "exception", error: err.message };
+  }
+}
 
 export default async function handler(req, res) {
   // Health check
@@ -42,57 +81,35 @@ export default async function handler(req, res) {
 
     console.log("✅ Mensagem válida de:", phone, "→", message.slice(0, 50));
 
-    // Busca configurações (usa DEFAULT_USER_ID ou o primeiro usuário)
-    const userId = process.env.DEFAULT_USER_ID;
-
-    if (!userId) {
-      console.warn("⚠️ DEFAULT_USER_ID não configurado, pulando IA");
-      return res.status(200).json({ ok: true, skipped: "no_user_id" });
-    }
-
-    const { data: settings, error: settingsErr } = await supabaseAdmin
-      .from("company_settings")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (settingsErr || !settings) {
-      console.error("❌ Erro ao buscar settings:", settingsErr);
-      return res.status(200).json({ ok: true, skipped: "no_settings" });
-    }
-
-    // Busca produtos
-    const { data: products } = await supabaseAdmin
-      .from("products")
-      .select("*")
-      .eq("user_id", userId);
-
-    // Monta prompt e chama IA
-    const prompt = buildIaPrompt(settings, products || [], message);
-
-    const openai = getOpenAIClient();
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // ⚠️ corrige aqui: é "gpt-4o-mini", não "gpt-4.1-mini"
-      messages: [{ role: "user", content: prompt }],
+    // Chama o /api/chat para processar com IA
+    const chatResponse = await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://seu-projeto.vercel.app'}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: { message },
+      }),
     });
 
-    const reply =
-      completion?.choices?.[0]?.message?.content ||
-      "Desculpe, não consegui processar sua mensagem. Pode repetir?";
+    const chatData = await chatResponse.json();
 
-    console.log("🤖 Resposta da IA:", reply.slice(0, 100));
+    if (!chatData.ok || !chatData.reply) {
+      console.error("❌ Erro ao processar /api/chat:", chatData);
+      return res.status(200).json({ ok: true, skipped: "chat_error" });
+    }
+
+    console.log("🤖 Resposta da IA:", chatData.reply.slice(0, 100));
 
     // Envia resposta via Z-API
-    const sent = await sendWhatsAppText(phone, reply);
+    const sent = await sendWhatsAppText(phone, chatData.reply);
 
     if (!sent.ok) {
       console.error("❌ Erro ao enviar via Z-API:", sent);
     }
 
-    return res.status(200).json({ ok: true, reply, sent });
+    return res.status(200).json({ ok: true, reply: chatData.reply, sent });
   } catch (err) {
     console.error("❌ /api/webhook ERROR:", err);
+    console.error("Stack:", err.stack);
     return res.status(200).json({ ok: false, error: err.message || "internal_error" });
   }
 }
