@@ -3,8 +3,8 @@
 // ====== PATCH GLOBAL PARA .trim() ======
 if (typeof String.prototype.trim === "function") {
   const originalTrim = String.prototype.trim;
-
-  String.prototype.trim = function () {
+  
+  String.prototype.trim = function() {
     if (this == null) return "";
     if (typeof this === "string") return originalTrim.call(this);
     try {
@@ -29,10 +29,15 @@ function safeTrim(v) {
   }
 }
 
-export default async function handler(req, res) {
-  console.log("🔵 /api/chat called - method:", req.method);
+// Importações
+import { supabaseAdmin } from "../../lib/supabaseAdmin";
+import { buildIaPrompt } from "../../lib/promptBuilder";
+import { getOpenAIClient } from "../../lib/openaiClient";
 
-  // Healthcheck (GET)
+export default async function handler(req, res) {
+  console.log("🔵 /api/chat START");
+
+  // GET = healthcheck
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
@@ -42,45 +47,89 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    console.log("❌ Method not POST, returning 405");
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
     const body = req.body || {};
 
-    console.log("📩 /api/chat body:", JSON.stringify(body, null, 2));
+    const userId = safeTrim(body.userId || process.env.DEFAULT_USER_ID);
+    const rawMessage = body?.text?.message || body?.message || body?.text || "";
+    const message = safeTrim(rawMessage);
 
-    // Aceita vários formatos de mensagem
-    const message =
-      safeTrim(body?.text?.message) ||
-      safeTrim(body?.message) ||
-      safeTrim(body?.body) ||
-      "";
+    console.log("📩 Received:", { userId, messageLength: message.length });
 
-    if (!message) {
-      console.log("⚠️ Missing message in body");
+    if (!userId || !message) {
+      console.log("⚠️ Missing userId or message");
       return res.status(200).json({
         ok: false,
-        error: "missing_message",
+        error: "missing_userId_or_message",
+        received: { userId, message: message.slice(0, 50) },
       });
     }
 
-    // Resposta fixa de teste (sem IA ainda)
-    const reply = `Recebi sua mensagem: "${message}". Em breve responderei com IA.`;
+    // Busca settings
+    console.log("🔍 Fetching settings...");
+    const { data: settings, error: settingsErr } = await supabaseAdmin
+      .from("company_settings")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-    console.log("✅ /api/chat reply:", reply);
+    if (settingsErr) {
+      console.error("❌ Supabase settings error:", settingsErr);
+      return res.status(200).json({ ok: false, error: "settings_error", details: settingsErr.message });
+    }
 
-    return res.status(200).json({
-      ok: true,
-      reply,
+    if (!settings) {
+      console.log("⚠️ No settings found for userId:", userId);
+      return res.status(200).json({ ok: false, error: "no_settings" });
+    }
+
+    console.log("✅ Settings OK:", settings.company_name);
+
+    // Busca produtos
+    console.log("🔍 Fetching products...");
+    const { data: products, error: prodErr } = await supabaseAdmin
+      .from("products")
+      .select("*")
+      .eq("user_id", userId);
+
+    if (prodErr) {
+      console.error("⚠️ Products error:", prodErr);
+    }
+
+    console.log("✅ Products:", products?.length || 0);
+
+    // Monta prompt
+    console.log("🤖 Building prompt...");
+    const prompt = buildIaPrompt(settings, products || [], message);
+
+    // Chama OpenAI
+    console.log("🤖 Calling OpenAI...");
+    const openai = getOpenAIClient();
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
     });
+
+    const reply = safeTrim(completion?.choices?.[0]?.message?.content) || 
+      "Não consegui responder agora. Pode repetir sua pergunta, por favor?";
+
+    console.log("✅ OpenAI reply:", reply.slice(0, 100));
+
+    return res.status(200).json({ ok: true, reply });
+
   } catch (err) {
-    console.error("❌ /api/chat ERROR:", err);
+    console.error("❌ /api/chat ERROR:", err.message);
     console.error("Stack:", err.stack);
+
     return res.status(200).json({
       ok: false,
-      error: err.message || "internal_error",
+      error: "internal_error",
+      message: err.message,
+      type: err.constructor.name,
     });
   }
 }
