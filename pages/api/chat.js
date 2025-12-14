@@ -1,151 +1,139 @@
 // pages/api/chat.js
 
 // ====== PATCH GLOBAL PARA .trim() ======
-// ISSO PRECISA ESTAR NO TOPO, ANTES DE QUALQUER IMPORT
 if (typeof String.prototype.trim === "function") {
   const originalTrim = String.prototype.trim;
   
   String.prototype.trim = function() {
-    // Se this for null/undefined, retorna string vazia
     if (this == null) return "";
-    
-    // Se já for string, usa trim original
-    if (typeof this === "string") {
-      return originalTrim.call(this);
-    }
-    
-    // Caso contrário, converte para string primeiro
+    if (typeof this === "string") return originalTrim.call(this);
     try {
       return String(this).trim();
     } catch (e) {
-      console.warn("⚠️ trim() chamado em valor não-string:", typeof this, this);
+      console.warn("⚠️ trim() error:", typeof this, this);
       return "";
     }
   };
 }
 // ====== FIM DO PATCH ======
 
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
-import { buildIaPrompt } from "../../lib/promptBuilder";
-import { getOpenAIClient } from "../../lib/openaiClient";
-import { safeString } from "../../lib/utils";
+function safeTrim(v) {
+  try {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v.trim();
+    if (typeof v === "number" || typeof v === "boolean") return String(v).trim();
+    if (typeof v === "object") return JSON.stringify(v).trim();
+    return String(v).trim();
+  } catch {
+    return "";
+  }
+}
+
+function safePhone(v) {
+  const s = safeTrim(v);
+  return s.replace(/\D/g, "");
+}
+
+// Importações necessárias
+import Airtable from 'airtable';
+import OpenAI from 'openai';
+
+// Configuração do Airtable
+const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+
+// Configuração do OpenAI
+const openai = new OpenAI({ 
+  apiKey: process.env.OPENAI_API_KEY 
+});
 
 export default async function handler(req, res) {
+  console.log("🔵 /api/chat called - method:", req.method);
+
+  if (req.method !== 'POST') {
+    console.log("❌ Method not POST, returning 405");
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   try {
-    console.log("🟢 /api/chat START - timestamp:", new Date().toISOString());
+    const { userId, text } = req.body;
 
-    // Healthcheck
-    if (req.method === "GET") {
-      return res.status(200).json({
-        ok: true,
-        route: "/api/chat",
-        hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-        hasSupabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-        trimPatchActive: true,
+    console.log("📩 Request body:", JSON.stringify(req.body, null, 2));
+
+    const safeUserId = safeTrim(userId);
+    const rawMessage = text?.message || text || "";
+    const message = safeTrim(rawMessage);
+
+    if (!safeUserId || !message) {
+      console.log("❌ Missing userId or message");
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'userId and message are required',
+        received: { userId: safeUserId, message }
       });
     }
 
-    if (req.method !== "POST") {
-      return res.status(405).json({ ok: false, error: "Method not allowed" });
-    }
+    console.log("✅ Valid message from userId:", safeUserId, "→", message.slice(0, 50));
 
-    const body = req.body || {};
+    // Busca histórico do usuário no Airtable
+    const records = await base('Conversations')
+      .select({
+        filterByFormula: `{userId} = '${safeUserId}'`,
+        sort: [{ field: 'timestamp', direction: 'asc' }],
+      })
+      .all();
 
-    // Detecta webhook Z-API
-    const isWebhook = !body.userId;
+    console.log("📚 Found", records.length, "conversation records");
 
-    const userId = safeString(body.userId || process.env.DEFAULT_USER_ID);
+    const history = records.map((r) => ({
+      role: safeTrim(r.fields.role),
+      content: safeTrim(r.fields.content),
+    }));
 
-    // Extrai mensagem de TODAS as formas possíveis
-    const message =
-      safeString(body?.text?.message) ||
-      safeString(body?.message?.text) ||
-      safeString(body?.message) ||
-      safeString(body?.text) ||
-      safeString(body?.messageText) ||
-      safeString(body?.body);
+    // Adiciona a mensagem atual ao histórico
+    history.push({ role: 'user', content: message });
 
-    console.log("📩 /api/chat RECEIVED:", {
-      isWebhook,
-      userId,
-      messageLength: message.length,
-      bodyKeys: Object.keys(body),
-    });
+    console.log("🤖 Calling OpenAI with", history.length, "messages");
 
-    if (!userId || !message) {
-      console.log("⚠️ Missing userId or message, skipping");
-      return res.status(200).json({ 
-        ok: true, 
-        skipped: true, 
-        reason: "missing_user_or_message",
-        received: { userId, message: message.slice(0, 50) }
-      });
-    }
-
-    console.log("🔍 Fetching settings for userId:", userId);
-
-    // Busca configurações
-    const { data: settings, error: settingsErr } = await supabaseAdmin
-      .from("company_settings")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (settingsErr) {
-      console.error("❌ SUPABASE settings error:", settingsErr);
-      return res.status(200).json({ ok: true, skipped: true, reason: "settings_error", error: settingsErr.message });
-    }
-
-    if (!settings) {
-      console.log("⚠️ No settings found for userId:", userId);
-      return res.status(200).json({ ok: true, skipped: true, reason: "no_settings" });
-    }
-
-    console.log("✅ Settings found:", settings.company_name);
-
-    // Produtos
-    console.log("🔍 Fetching products for userId:", userId);
-    
-    const { data: products, error: prodErr } = await supabaseAdmin
-      .from("products")
-      .select("*")
-      .eq("user_id", userId);
-
-    if (prodErr) {
-      console.error("❌ SUPABASE products error:", prodErr);
-    } else {
-      console.log("✅ Products found:", products?.length || 0);
-    }
-
-    console.log("🤖 Building prompt...");
-    const prompt = buildIaPrompt(settings, products || [], message);
-
-    console.log("🤖 Calling OpenAI...");
-    const openai = getOpenAIClient();
-
+    // Chama OpenAI
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
+      model: 'gpt-4',
+      messages: history,
     });
 
-    const reply =
-      completion?.choices?.[0]?.message?.content ||
-      "Não consegui responder agora. Pode repetir sua pergunta, por favor?";
+    const reply = safeTrim(completion.choices[0]?.message?.content) || "Não consegui responder. Tente novamente.";
 
     console.log("✅ OpenAI reply:", reply.slice(0, 100));
 
+    // Salva user message no Airtable
+    await base('Conversations').create({
+      userId: safeUserId,
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Salva assistant reply no Airtable
+    await base('Conversations').create({
+      userId: safeUserId,
+      role: 'assistant',
+      content: reply,
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log("✅ Saved to Airtable");
+
     return res.status(200).json({ ok: true, reply });
-    
+
   } catch (err) {
-    console.error("🔥 /api/chat ERROR:", err.message);
-    console.error("🔥 Stack:", err.stack);
-    console.error("🔥 Type:", err.constructor.name);
-    
+    console.error("❌ /api/chat ERROR:", err);
+    console.error("Error name:", err.name);
+    console.error("Error message:", err.message);
+    console.error("Stack:", err.stack);
+
     return res.status(200).json({ 
       ok: false, 
-      error: "internal_error", 
-      message: err.message,
-      type: err.constructor.name,
+      error: err.message || 'internal_error',
+      errorType: err.name,
     });
   }
 }
